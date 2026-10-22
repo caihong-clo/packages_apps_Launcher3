@@ -66,13 +66,11 @@ class ScalingWorkspaceRevealAnim(
 ) {
     companion object {
         private const val FADE_DURATION_MS = 200L
-        // OxygenOS settles home and clears its blur in about half a second, so the icon a window
-        // flies into is sharp again by the time it lands.
-        private const val SCALE_DURATION_MS = 500L
+        private const val SCALE_DURATION_MS = 1000L
         private const val MAX_ALPHA = 1f
         private const val MIN_ALPHA = 0f
         internal const val MAX_SIZE = 1f
-        internal const val MIN_SIZE = 0.9f
+        internal const val MIN_SIZE = 0.85f
 
         /**
          * Custom interpolator for both the home and wallpaper scaling. Necessary because EMPHASIZED
@@ -88,7 +86,7 @@ class ScalingWorkspaceRevealAnim(
                 }
             )
 
-        val BLUR_INTERPOLATOR = Interpolators.clampToProgress(EMPHASIZED, 0f, 0.4f)
+        val BLUR_INTERPOLATOR = Interpolators.clampToProgress(EMPHASIZED, 0f, 0.666f)
     }
 
     private val animation = PendingAnimation(SCALE_DURATION_MS)

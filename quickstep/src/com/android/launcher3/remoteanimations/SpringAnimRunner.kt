@@ -46,7 +46,6 @@ constructor(
     activityContext: ActivityContext,
     private val startRadius: Float,
     private val alphaEndProgress: Float = ALPHA_END_PROGRESS,
-    private val alphaStartProgress: Float = ALPHA_START_PROGRESS,
 ) : OnUpdateListener {
 
     private val matrix = Matrix()
@@ -150,12 +149,12 @@ constructor(
     /** Alpha interpolates between [1, 0] between progress values [start, end] */
     private fun getWindowAlpha(progress: Float): Float =
         when {
-            progress <= alphaStartProgress -> 1f
+            progress <= ALPHA_START_PROGRESS -> 1f
             progress >= alphaEndProgress -> 0f
             else ->
                 Utilities.mapToRange(
                     progress,
-                    alphaStartProgress,
+                    ALPHA_START_PROGRESS,
                     alphaEndProgress,
                     1f,
                     0f,

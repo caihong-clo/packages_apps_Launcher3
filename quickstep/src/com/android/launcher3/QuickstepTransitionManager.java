@@ -60,10 +60,6 @@ import static com.android.launcher3.testing.shared.TestProtocol.WALLPAPER_OPEN_A
 import static com.android.launcher3.util.Executors.MAIN_EXECUTOR;
 import static com.android.launcher3.util.MultiPropertyFactory.MULTI_PROPERTY_VALUE;
 import static com.android.launcher3.util.window.RefreshRateTracker.getSingleFrameMs;
-import static com.android.launcher3.views.FloatingIconView.CLOSE_ICON_FADE_END;
-import static com.android.launcher3.views.FloatingIconView.CLOSE_ICON_FADE_START;
-import static com.android.launcher3.views.FloatingIconView.CLOSE_WINDOW_FADE_END;
-import static com.android.launcher3.views.FloatingIconView.CLOSE_WINDOW_FADE_START;
 import static com.android.launcher3.views.FloatingIconView.SHAPE_PROGRESS_DURATION;
 import static com.android.quickstep.TaskViewUtils.findTaskViewToLaunch;
 import static com.android.quickstep.util.AnimUtils.clampToDuration;
@@ -207,11 +203,10 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
      */
     public static final int STATUS_BAR_TRANSITION_PRE_DELAY = 96;
 
-    // Long enough for OxygenOS's launch spring to settle.
-    public static final long APP_LAUNCH_DURATION = 320;
+    public static final long APP_LAUNCH_DURATION = 380;
 
-    private static final long APP_LAUNCH_ALPHA_DURATION = 100;
-    private static final long APP_LAUNCH_ALPHA_START_DELAY = 20;
+    private static final long APP_LAUNCH_ALPHA_DURATION = 50;
+    private static final long APP_LAUNCH_ALPHA_START_DELAY = 25;
 
     public static final int ANIMATION_NAV_FADE_IN_DURATION = 266;
     public static final int ANIMATION_NAV_FADE_OUT_DURATION = 133;
@@ -236,7 +231,7 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
     // is solved.
     private static final int TASKBAR_TO_HOME_DURATION_FAST = 300;
     private static final int TASKBAR_TO_HOME_DURATION_SLOW = 1000;
-    protected static final int CONTENT_SCALE_DURATION = 320;
+    protected static final int CONTENT_SCALE_DURATION = 350;
 
     // Cross-fade duration between App Widget and App when launching from widget.
     private static final int WIDGET_CROSSFADE_DURATION_MILLIS = 125;
@@ -250,40 +245,20 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
     /**
      * Damped-harmonic-oscillator interpolator for a subtle OEM-style spring bounce.
      */
-    /**
-     * A spring of the given stiffness and damping ratio played over a fixed duration, so it can
-     * drive time based animators the way OxygenOS drives its app transitions. Values reach 1 at
-     * the end rather than asymptotically.
-     */
     private static final class SpringInterpolator implements Interpolator {
         private static final int TABLE_SIZE = 256;
         private final float[] mTable = new float[TABLE_SIZE];
 
-        SpringInterpolator(double stiffness, double dampingRatio, long durationMs) {
-            double w = Math.sqrt(stiffness);
-            double seconds = durationMs / 1000.0;
+        SpringInterpolator(double dampingRatio, double numOfCycles) {
+            double wn = numOfCycles * 2 * Math.PI;
+            double dSq = 1 - dampingRatio * dampingRatio;
+            double wd = wn * Math.sqrt(Math.max(1e-9, dSq));
             for (int i = 0; i < TABLE_SIZE; i++) {
-                mTable[i] = (float) position(w, dampingRatio, seconds * i / (TABLE_SIZE - 1));
+                double t = (double) i / (TABLE_SIZE - 1);
+                double envelope = Math.exp(-dampingRatio * wn * t);
+                mTable[i] = (float) (1.0 - envelope * (
+                        Math.cos(wd * t) + (dampingRatio * wn / wd) * Math.sin(wd * t)));
             }
-            float end = mTable[TABLE_SIZE - 1];
-            for (int i = 0; i < TABLE_SIZE; i++) {
-                mTable[i] /= end;
-            }
-        }
-
-        /** The position at time {@code t} of a spring released from rest at 0 towards 1. */
-        private static double position(double w, double z, double t) {
-            if (z < 1) {
-                double wd = w * Math.sqrt(1 - z * z);
-                return 1 - Math.exp(-z * w * t) * (Math.cos(wd * t) + z * w / wd * Math.sin(wd * t));
-            }
-            if (z == 1) {
-                return 1 - (1 + w * t) * Math.exp(-w * t);
-            }
-            double root = Math.sqrt(z * z - 1);
-            double r1 = -w * (z - root);
-            double r2 = -w * (z + root);
-            return 1 - (r2 * Math.exp(r1 * t) - r1 * Math.exp(r2 * t)) / (r2 - r1);
         }
 
         @Override
@@ -296,6 +271,14 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             return mTable[lo] + frac * (mTable[lo + 1] - mTable[lo]);
         }
     }
+
+    /**
+     * Damped-harmonic-oscillator interpolator used to give the app-open/close morph a
+     * "fluid" spring feel (OxygenOS-style) instead of a static Material easing curve.
+     * getInterpolation(0) == 0 and getInterpolation(1) settles to ~1 with a small
+     * decaying overshoot, controlled by dampingRatio (lower = bouncier) and
+     * numOfCycles (higher = faster settling oscillation).
+     */
 
     private final RunnableList mCleanupTask = new RunnableList();
     protected final QuickstepLauncher mLauncher;
@@ -355,10 +338,6 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
 
     private final Interpolator mOpeningXInterpolator;
     private final Interpolator mOpeningInterpolator;
-    private final Interpolator mOpeningRadiusInterpolator;
-    private final Interpolator mContentScaleInterpolator;
-    private final Interpolator mIconAlphaInterpolator;
-    private final Interpolator mBlurInterpolator;
 
     private final SystemUiProxy mSystemUiProxy;
 
@@ -422,14 +401,7 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
 
         mOpeningXInterpolator = AnimationUtils.loadInterpolator(
                 launcher, R.interpolator.app_open_x);
-        // OxygenOS's app launch: the window, its corners and home behind it all follow one
-        // critically damped spring, a touch quicker than its recordings so opening keeps pace with
-        // closing: three quarters of the way at 133 ms and 90% at 200 ms.
-        mOpeningInterpolator = new SpringInterpolator(400, 1, APP_LAUNCH_DURATION);
-        mOpeningRadiusInterpolator = mOpeningInterpolator;
-        mContentScaleInterpolator = new SpringInterpolator(400, 1, CONTENT_SCALE_DURATION);
-        mIconAlphaInterpolator = new SpringInterpolator(4000, 1, APP_LAUNCH_ALPHA_DURATION);
-        mBlurInterpolator = new SpringInterpolator(400, 1, (long) (APP_LAUNCH_DURATION * 0.75f));
+        mOpeningInterpolator = new SpringInterpolator(0.65, 1.0);
         mLatencyTracker = LatencyTracker.getInstance(launcher);
 
         mMaxBlurRadius = res.getDimensionPixelSize(
@@ -865,7 +837,7 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
 
                 ObjectAnimator scaleAnim = ObjectAnimator.ofFloat(view, SCALE_PROPERTY, scale)
                         .setDuration(CONTENT_SCALE_DURATION);
-                scaleAnim.setInterpolator(mContentScaleInterpolator);
+                scaleAnim.setInterpolator(DECELERATE_1_5);
                 launcherAnimator.play(scaleAnim);
             });
 
@@ -1030,26 +1002,31 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
         final float finalShadowRadius = appTargetsAreTranslucent ? 0 : mMaxShadowRadius;
 
         MultiValueUpdateListener listener = new MultiValueUpdateListener(mOpeningInterpolator) {
-            FloatProp mDx = new FloatProp(0, prop.dX);
-            FloatProp mDy = new FloatProp(0, prop.dY);
+            FloatProp mDx = new FloatProp(0, prop.dX, DECELERATE_1_5);
+            FloatProp mDy = new FloatProp(0, prop.dY, DECELERATE_1_5);
 
+            // Only the icon-grow scale gets the spring bounce -- the fluid morph feel.
             FloatProp mIconScaleToFitScreen = new FloatProp(prop.initialAppIconScale,
                     prop.finalAppIconScale);
-            // The icon hands over to the window quickly, on OxygenOS's stiff alpha spring.
             FloatProp mIconAlpha = new FloatProp(prop.iconAlphaStart, 0f,
-                    clampToDuration(mIconAlphaInterpolator, APP_LAUNCH_ALPHA_START_DELAY,
-                            APP_LAUNCH_ALPHA_DURATION, APP_LAUNCH_DURATION));
+                    clampToDuration(LINEAR, APP_LAUNCH_ALPHA_START_DELAY, APP_LAUNCH_ALPHA_DURATION,
+                            APP_LAUNCH_DURATION));
 
+            // Corner radius, shadow and crop-rect stay flat -- overshoot here wobbles the
+            // window's actual visible content/edges, not just the icon.
             FloatProp mWindowRadius =
                     new FloatProp(initialWindowRadius, getWindowCornerRadius(mLauncher),
-                            mOpeningRadiusInterpolator);
-            FloatProp mShadowRadius =
-                    new FloatProp(0, finalShadowRadius, mOpeningRadiusInterpolator);
+                            DECELERATE_1_5);
+            FloatProp mShadowRadius = new FloatProp(0, finalShadowRadius, DECELERATE_1_5);
 
-            FloatProp mCropRectCenterX = new FloatProp(prop.cropCenterXStart, prop.cropCenterXEnd);
-            FloatProp mCropRectCenterY = new FloatProp(prop.cropCenterYStart, prop.cropCenterYEnd);
-            FloatProp mCropRectWidth = new FloatProp(prop.cropWidthStart, prop.cropWidthEnd);
-            FloatProp mCropRectHeight = new FloatProp(prop.cropHeightStart, prop.cropHeightEnd);
+            FloatProp mCropRectCenterX = new FloatProp(prop.cropCenterXStart, prop.cropCenterXEnd,
+                    DECELERATE_1_5);
+            FloatProp mCropRectCenterY = new FloatProp(prop.cropCenterYStart, prop.cropCenterYEnd,
+                    DECELERATE_1_5);
+            FloatProp mCropRectWidth = new FloatProp(prop.cropWidthStart, prop.cropWidthEnd,
+                    DECELERATE_1_5);
+            FloatProp mCropRectHeight = new FloatProp(prop.cropHeightStart, prop.cropHeightEnd,
+                    DECELERATE_1_5);
 
             FloatProp mNavFadeOut = new FloatProp(1f, 0f, clampToDuration(
                     NAV_FADE_OUT_INTERPOLATOR, 0, ANIMATION_NAV_FADE_OUT_DURATION,
@@ -1062,10 +1039,10 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             // during the heaviest crop-rect phase at the end. This prevents jank when
             // app-launch blur is enabled in Launcher settings.
             FloatProp mBlurRadius = new FloatProp(0f, mMaxBlurRadius, clampToDuration(
-                    mBlurInterpolator, 0, (long) (APP_LAUNCH_DURATION * 0.75f),
+                    DECELERATE_1_5, 0, (long) (APP_LAUNCH_DURATION * 0.75f),
                     APP_LAUNCH_DURATION));
             FloatProp mBlurScrimAlpha = new FloatProp(0f, scrimAlpha, clampToDuration(
-                    mBlurInterpolator, 0, (long) (APP_LAUNCH_DURATION * 0.75f),
+                    DECELERATE_1_5, 0, (long) (APP_LAUNCH_DURATION * 0.75f),
                     APP_LAUNCH_DURATION));
 
             @Override
@@ -1085,12 +1062,14 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
                             windowTargetBounds, launcherIconBounds, v,
                             dragLayerBounds[0], dragLayerBounds[1], hasSplashScreen,
                             floatingView.isDifferentFromAppIcon());
-                    mCropRectCenterY = new FloatProp(prop.cropCenterYStart, prop.cropCenterYEnd);
-                    mCropRectHeight = new FloatProp(prop.cropHeightStart, prop.cropHeightEnd);
-                    mDy = new FloatProp(0, prop.dY);
+                    mCropRectCenterY = new FloatProp(prop.cropCenterYStart, prop.cropCenterYEnd,
+                            DECELERATE_1_5);
+                    mCropRectHeight = new FloatProp(prop.cropHeightStart, prop.cropHeightEnd,
+                            DECELERATE_1_5);
+                    mDy = new FloatProp(0, prop.dY, DECELERATE_1_5);
                     mIconScaleToFitScreen = new FloatProp(prop.initialAppIconScale,
                             prop.finalAppIconScale);
-                    float interpolatedPercent = mOpeningInterpolator.getInterpolation(percent);
+                    float interpolatedPercent = DECELERATE_1_5.getInterpolation(percent);
                     mCropRectHeight.value = Utilities.mapRange(interpolatedPercent,
                             prop.cropHeightStart, prop.cropHeightEnd);
                     mCropRectCenterY.value = Utilities.mapRange(interpolatedPercent,
@@ -1838,12 +1817,14 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             final float windowAlphaThreshold = 1f - SHAPE_PROGRESS_DURATION;
 
             RectFSpringAnim.OnUpdateListener runner = new SpringAnimRunner(targets, targetRect,
-                    closingWindowStartRectF, mLauncher, startWindowCornerRadius,
-                    CLOSE_WINDOW_FADE_END, CLOSE_WINDOW_FADE_START) {
+                    closingWindowStartRectF, mLauncher, startWindowCornerRadius) {
                 @Override
                 public void onUpdate(RectF currentRectF, float progress) {
-                    float iconAlpha = Interpolators.clampToProgress(
-                            progress, CLOSE_ICON_FADE_START, CLOSE_ICON_FADE_END);
+                    // We want the icon alpha to be 1 once this threshold is met, so that it can be
+                    // seen morphing into the icon shape. But before the threshold, we want to limit
+                    // the alpha to reduce the blur effect behind the window.
+                    float iconAlpha =
+                            Interpolators.clampToProgress(progress, 0f, windowAlphaThreshold);
                     finalFloatingIconView.update(iconAlpha, currentRectF, progress,
                             windowAlphaThreshold, getCornerRadius(progress), false);
 
@@ -2135,7 +2116,7 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
                 anim.play(
                         new ScalingWorkspaceRevealAnim(mLauncher, rectFSpringAnim,
                                 rectFSpringAnim.getTargetRect(),
-                                false /* playAlphaReveal */,
+                                !fromPredictiveBack /* playAlphaReveal */,
                                 Utilities.blurBackgroundAtAppLaunch(
                                         mLauncher.getApplicationContext())
                                         /* playBlur */).getAnimators());
